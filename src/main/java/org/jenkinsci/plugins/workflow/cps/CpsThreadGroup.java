@@ -68,6 +68,7 @@ import javax.annotation.CheckForNull;
 import static org.jenkinsci.plugins.workflow.cps.CpsFlowExecution.*;
 import static org.jenkinsci.plugins.workflow.cps.persistence.PersistenceContext.*;
 import org.jenkinsci.plugins.workflow.pickles.PickleFactory;
+import org.jenkinsci.plugins.workflow.support.storage.FlowNodeStorage;
 
 /**
  * List of {@link CpsThread}s that form a single {@link CpsFlowExecution}.
@@ -78,7 +79,7 @@ import org.jenkinsci.plugins.workflow.pickles.PickleFactory;
  * @author Kohsuke Kawaguchi
  */
 @PersistIn(PROGRAM)
-@edu.umd.cs.findbugs.annotations.SuppressWarnings("SE_BAD_FIELD") // bogus warning about closures
+@SuppressFBWarnings("SE_BAD_FIELD") // bogus warning about closures
 public final class CpsThreadGroup implements Serializable {
     /**
      * {@link CpsThreadGroup} always belong to the same {@link CpsFlowExecution}.
@@ -231,11 +232,11 @@ public final class CpsThreadGroup implements Serializable {
             runner.submit(new Callable<Void>() {
                 @SuppressFBWarnings(value="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE", justification="runner.submit() result")
                 public Void call() throws Exception {
-                    Jenkins j = Jenkins.getInstance();
-                    if (paused.get() || j == null || j.isQuietingDown()) {
+                    Jenkins j = Jenkins.getInstanceOrNull();
+                    if (paused.get() || j == null || (execution != null && j.isQuietingDown())) {
                         // by doing the pause check inside, we make sure that scheduleRun() returns a
                         // future that waits for any previously scheduled tasks to be completed.
-                        saveProgramIfPossible();
+                        saveProgramIfPossible(true);
                         f.set(null);
                         return null;
                     }
@@ -339,7 +340,10 @@ public final class CpsThreadGroup implements Serializable {
                         result = ((FlowInterruptedException) error).getResult();
                     }
                     execution.setResult(result);
-                    t.head.get().addAction(new ErrorAction(error));
+                    FlowNode fn = t.head.get();
+                    if (fn != null) {
+                        t.head.get().addAction(new ErrorAction(error));
+                    }
                 }
 
                 if (!t.isAlive()) {
@@ -349,18 +353,23 @@ public final class CpsThreadGroup implements Serializable {
                     threads.remove(t.id);
                     if (threads.isEmpty()) {
                         execution.onProgramEnd(o);
+                        try {
+                            this.execution.saveOwner();
+                        } catch (Exception ex) {
+                            LOGGER.log(Level.WARNING, "Error saving execution for "+this.getExecution(), ex);
+                        }
                         ending = true;
                     }
                 } else {
                     stillRunnable |= t.isRunnable();
                 }
-
                 changed = true;
             }
         }
 
         if (changed && !stillRunnable) {
-            saveProgramIfPossible();
+            execution.persistedClean = null;
+            saveProgramIfPossible(false);
         }
         if (ending) {
             execution.cleanUpHeap();
@@ -416,13 +425,27 @@ public final class CpsThreadGroup implements Serializable {
 
     /**
      * Like {@link #saveProgram()} but will not fail.
+     * @param enteringQuietState True if we're moving to quiet state - pausing or quieting down and need to write the program.
      */
     @CpsVmThreadOnly
-    void saveProgramIfPossible() {
-        try {
-            saveProgram();
-        } catch (IOException x) {
-            LOGGER.log(WARNING, "program state save failed", x);
+    void saveProgramIfPossible(boolean enteringQuietState) {
+        if (this.getExecution() != null && (this.getExecution().getDurabilityHint().isPersistWithEveryStep()
+                || enteringQuietState)) {
+
+            try {  // Program may depend on flownodes being saved, so save nodes
+                FlowNodeStorage storage = this.execution.getStorage();
+                if (storage != null) {
+                    storage.flush();
+                }
+            } catch (IOException ioe) {
+                LOGGER.log(Level.WARNING, "Error persisting FlowNode storage before saving program", ioe);
+            }
+
+            try {
+                saveProgram();
+            } catch (IOException x) {
+                LOGGER.log(WARNING, "program state save failed", x);
+            }
         }
     }
 

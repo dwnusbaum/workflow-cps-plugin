@@ -27,27 +27,35 @@ package org.jenkinsci.plugins.workflow.cps;
 import hudson.AbortException;
 import hudson.Extension;
 import hudson.FilePath;
+import hudson.Functions;
 import hudson.model.Action;
 import hudson.model.Computer;
+import hudson.model.Item;
 import hudson.model.Job;
 import hudson.model.Node;
 import hudson.model.Queue;
 import hudson.model.Run;
+import hudson.model.Run.RunnerAbortedException;
 import hudson.model.TaskListener;
 import hudson.model.TopLevelItem;
 import hudson.scm.SCM;
 import hudson.scm.SCMDescriptor;
 import hudson.slaves.WorkspaceList;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.util.Collection;
 import java.util.List;
 import jenkins.model.Jenkins;
 import jenkins.scm.api.SCMFileSystem;
 import org.jenkinsci.plugins.workflow.cps.persistence.PersistIn;
 import static org.jenkinsci.plugins.workflow.cps.persistence.PersistenceContext.JOB;
+
+import org.jenkinsci.plugins.workflow.flow.DurabilityHintProvider;
 import org.jenkinsci.plugins.workflow.flow.FlowDefinition;
 import org.jenkinsci.plugins.workflow.flow.FlowDefinitionDescriptor;
+import org.jenkinsci.plugins.workflow.flow.FlowDurabilityHint;
 import org.jenkinsci.plugins.workflow.flow.FlowExecutionOwner;
+import org.jenkinsci.plugins.workflow.flow.GlobalDefaultFlowDurabilityLevel;
 import org.jenkinsci.plugins.workflow.steps.scm.GenericSCMStep;
 import org.jenkinsci.plugins.workflow.steps.scm.SCMStep;
 import org.jenkinsci.plugins.workflow.support.actions.WorkspaceActionImpl;
@@ -65,7 +73,7 @@ public class CpsScmFlowDefinition extends FlowDefinition {
 
     @DataBoundConstructor public CpsScmFlowDefinition(SCM scm, String scriptPath) {
         this.scm = scm;
-        this.scriptPath = scriptPath;
+        this.scriptPath = scriptPath.trim();
     }
 
     public SCM getScm() {
@@ -95,19 +103,22 @@ public class CpsScmFlowDefinition extends FlowDefinition {
             throw new IOException("can only check out SCM into a Run");
         }
         Run<?,?> build = (Run<?,?>) _build;
+        String expandedScriptPath = build.getEnvironment(listener).expand(scriptPath);
         if (isLightweight()) {
             try (SCMFileSystem fs = SCMFileSystem.of(build.getParent(), scm)) {
                 if (fs != null) {
-                    String script = fs.child(scriptPath).contentAsString();
-                    listener.getLogger().println("Obtained " + scriptPath + " from " + scm.getKey());
-                    return new CpsFlowExecution(script, true, owner);
+                    String script = fs.child(expandedScriptPath).contentAsString();
+                    listener.getLogger().println("Obtained " + expandedScriptPath + " from " + scm.getKey());
+                    Queue.Executable exec = owner.getExecutable();
+                    FlowDurabilityHint hint = (exec instanceof Item) ? DurabilityHintProvider.suggestedFor((Item)exec) : GlobalDefaultFlowDurabilityLevel.getDefaultDurabilityHint();
+                    return new CpsFlowExecution(script, true, owner, hint);
                 } else {
                     listener.getLogger().println("Lightweight checkout support not available, falling back to full checkout.");
                 }
             }
         }
         FilePath dir;
-        Node node = Jenkins.getActiveInstance();
+        Node node = Jenkins.get();
         if (build.getParent() instanceof TopLevelItem) {
             FilePath baseWorkspace = node.getWorkspaceFor((TopLevelItem) build.getParent());
             if (baseWorkspace == null) {
@@ -117,8 +128,8 @@ public class CpsScmFlowDefinition extends FlowDefinition {
         } else { // should not happen, but just in case:
             dir = new FilePath(owner.getRootDir());
         }
-        listener.getLogger().println("Checking out " + scm.getKey() + " into " + dir + " to read " + scriptPath);
-        String script;
+        listener.getLogger().println("Checking out " + scm.getKey() + " into " + dir + " to read " + expandedScriptPath);
+        String script = null;
         Computer computer = node.toComputer();
         if (computer == null) {
             throw new IOException(node.getDisplayName() + " may be offline");
@@ -126,9 +137,33 @@ public class CpsScmFlowDefinition extends FlowDefinition {
         SCMStep delegate = new GenericSCMStep(scm);
         delegate.setPoll(true);
         delegate.setChangelog(true);
+        FilePath acquiredDir;
         try (WorkspaceList.Lease lease = computer.getWorkspaceList().acquire(dir)) {
-            delegate.checkout(build, dir, listener, node.createLauncher(listener));
-            FilePath scriptFile = dir.child(scriptPath);
+            for (int retryCount = Jenkins.get().getScmCheckoutRetryCount(); retryCount >= 0; retryCount--) {
+                try {
+                    delegate.checkout(build, dir, listener, node.createLauncher(listener));
+                    break;
+                } catch (AbortException e) {
+                    // abort exception might have a null message.
+                    // If so, just skip echoing it.
+                    if (e.getMessage() != null) {
+                        listener.error(e.getMessage());
+                    }
+                } catch (InterruptedIOException e) {
+                    throw e;
+                } catch (IOException e) {
+                    // checkout error not yet reported
+                    listener.error("Checkout failed").println(Functions.printThrowable(e).trim()); // TODO 2.43+ use Functions.printStackTrace
+                }
+
+                if (retryCount == 0)   // all attempts failed
+                    throw new AbortException("Maximum checkout retry attempts reached, aborting");
+
+                listener.getLogger().println("Retrying after 10 seconds");
+                Thread.sleep(10000);
+            }
+
+            FilePath scriptFile = dir.child(expandedScriptPath);
             if (!scriptFile.absolutize().getRemote().replace('\\', '/').startsWith(dir.absolutize().getRemote().replace('\\', '/') + '/')) { // TODO JENKINS-26838
                 throw new IOException(scriptFile + " is not inside " + dir);
             }
@@ -136,9 +171,12 @@ public class CpsScmFlowDefinition extends FlowDefinition {
                 throw new AbortException(scriptFile + " not found");
             }
             script = scriptFile.readToString();
+            acquiredDir = lease.path;
         }
-        CpsFlowExecution exec = new CpsFlowExecution(script, true, owner);
-        exec.flowStartNodeActions.add(new WorkspaceActionImpl(dir, null));
+        Queue.Executable queueExec = owner.getExecutable();
+        FlowDurabilityHint hint = (queueExec instanceof Run) ? DurabilityHintProvider.suggestedFor(((Run)queueExec).getParent()) : GlobalDefaultFlowDurabilityLevel.getDefaultDurabilityHint();
+        CpsFlowExecution exec = new CpsFlowExecution(script, true, owner, hint);
+        exec.flowStartNodeActions.add(new WorkspaceActionImpl(acquiredDir, null));
         return exec;
     }
 

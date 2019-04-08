@@ -95,7 +95,7 @@ import static org.jenkinsci.plugins.workflow.cps.persistence.PersistenceContext.
  * @see Step#start(StepContext)
  */
 @PersistIn(ANYWHERE)
-@edu.umd.cs.findbugs.annotations.SuppressWarnings("SE_TRANSIENT_FIELD_NOT_RESTORED") // bodyInvokers, syncMode handled specially
+@SuppressFBWarnings("SE_TRANSIENT_FIELD_NOT_RESTORED") // bodyInvokers, syncMode handled specially
 public class CpsStepContext extends DefaultStepContext { // TODO add XStream class mapper
 
     private static final Logger LOGGER = Logger.getLogger(CpsStepContext.class.getName());
@@ -197,7 +197,7 @@ public class CpsStepContext extends DefaultStepContext { // TODO add XStream cla
      */
     @SuppressFBWarnings(value="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE", justification="TODO 1.653+ switch to Jenkins.getInstanceOrNull")
     public @CheckForNull StepDescriptor getStepDescriptor() {
-        Jenkins j = Jenkins.getInstance();
+        Jenkins j = Jenkins.getInstanceOrNull();
         if (j == null) {
             return null;
         }
@@ -538,13 +538,22 @@ public class CpsStepContext extends DefaultStepContext { // TODO add XStream cla
     @Override public ListenableFuture<Void> saveState() {
         try {
             final SettableFuture<Void> f = SettableFuture.create();
-            getFlowExecution().runInCpsVmThread(new FutureCallback<CpsThreadGroup>() {
+            CpsFlowExecution exec = getFlowExecution();
+            if (!exec.getDurabilityHint().isPersistWithEveryStep()) {
+                f.set(null);
+                return f;
+            }
+
+            exec.runInCpsVmThread(new FutureCallback<CpsThreadGroup>() {
                 @Override public void onSuccess(CpsThreadGroup result) {
                     try {
                         // TODO keep track of whether the program was saved anyway after saveState was called but before now, and do not bother resaving it in that case
-                        result.saveProgram();
+                        if (result.getExecution().getDurabilityHint().isPersistWithEveryStep()) {
+                            result.getExecution().getStorage().flush();
+                            result.saveProgram();
+                        }
                         f.set(null);
-                    } catch (IOException x) {
+                    } catch (Exception x) {
                         f.setException(x);
                     }
                 }
@@ -588,7 +597,7 @@ public class CpsStepContext extends DefaultStepContext { // TODO add XStream cla
 
     private static final long serialVersionUID = 1L;
 
-    @edu.umd.cs.findbugs.annotations.SuppressWarnings("SE_INNER_CLASS")
+    @SuppressFBWarnings("SE_INNER_CLASS")
     private class ScheduleNextRun implements FutureCallback<Object>, Serializable {
         public void onSuccess(Object _)    { scheduleNextRun(); }
         public void onFailure(Throwable _) { scheduleNextRun(); }

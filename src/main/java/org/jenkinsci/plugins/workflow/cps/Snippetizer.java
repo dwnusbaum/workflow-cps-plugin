@@ -25,6 +25,7 @@
 package org.jenkinsci.plugins.workflow.cps;
 
 import hudson.Extension;
+import hudson.ExtensionList;
 import hudson.Functions;
 import hudson.model.Action;
 import hudson.model.Describable;
@@ -45,6 +46,7 @@ import java.util.TreeSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
 import javax.lang.model.SourceVersion;
 import jenkins.model.Jenkins;
 import jenkins.model.TransientActionFactory;
@@ -77,6 +79,17 @@ import org.kohsuke.stapler.StaplerRequest;
      */
     static String step2Groovy(Step s) throws UnsupportedOperationException {
         return object2Groovy(new StringBuilder(), s, false).toString();
+    }
+
+    /**
+     * Publicly accessible version of {@link #object2Groovy(StringBuilder, Object, boolean)} that translates an object into
+     * the equivalent Pipeline Groovy string.
+     *
+     * @param o The object to translate.
+     * @return A string translation of the object.
+     */
+    public static String object2Groovy(Object o) throws UnsupportedOperationException {
+        return object2Groovy(new StringBuilder(), o, false).toString();
     }
 
     /**
@@ -129,7 +142,7 @@ import org.kohsuke.stapler.StaplerRequest;
                 if (d.isMetaStep()) {
                     // if we have a symbol name for the wrapped Describable, we can produce
                     // a more concise form that hides it
-                    DescribableModel<?> m = new DescribableModel(d.clazz);
+                    DescribableModel<?> m = DescribableModel.of(d.clazz);
                     DescribableParameter p = m.getFirstRequiredParameter();
                     if (p!=null) {
                         Object wrapped = uninst.getArguments().get(p.getName());
@@ -368,7 +381,7 @@ import org.kohsuke.stapler.StaplerRequest;
     }
 
     @Override public Descriptor getDescriptorByName(String id) {
-        return Jenkins.getActiveInstance().getDescriptorByName(id);
+        return Jenkins.get().getDescriptorByName(id);
     }
 
     @Restricted(NoExternalUse.class)
@@ -378,7 +391,7 @@ import org.kohsuke.stapler.StaplerRequest;
             if (d.isAdvanced() == advanced) {
                 t.add(new QuasiDescriptor(d));
                 if (d.isMetaStep()) {
-                    DescribableModel<?> m = new DescribableModel<>(d.clazz);
+                    DescribableModel<?> m = DescribableModel.of(d.clazz);
                     Collection<DescribableParameter> parameters = m.getParameters();
                     if (parameters.size() == 1) {
                         DescribableParameter delegate = parameters.iterator().next();
@@ -387,7 +400,7 @@ import org.kohsuke.stapler.StaplerRequest;
                                 // TODO HeterogeneousObjectType does not yet expose symbol information, and DescribableModel.symbolOf is private
                                 for (DescribableModel<?> delegateOptionSchema : ((HeterogeneousObjectType) delegate.getType()).getTypes().values()) {
                                     Class<?> delegateOptionType = delegateOptionSchema.getType();
-                                    Descriptor<?> delegateDescriptor = Jenkins.getActiveInstance().getDescriptorOrDie(delegateOptionType.asSubclass(Describable.class));
+                                    Descriptor<?> delegateDescriptor = Jenkins.get().getDescriptorOrDie(delegateOptionType.asSubclass(Describable.class));
                                     Set<String> symbols = SymbolLookup.getSymbolValue(delegateDescriptor);
                                     if (!symbols.isEmpty()) {
                                         t.add(new QuasiDescriptor(delegateDescriptor));
@@ -465,17 +478,17 @@ import org.kohsuke.stapler.StaplerRequest;
     public HttpResponse doGenerateSnippet(StaplerRequest req, @QueryParameter String json) throws Exception {
         // TODO is there not an easier way to do this? Maybe Descriptor.newInstancesFromHeteroList on a one-element JSONArray?
         JSONObject jsonO = JSONObject.fromObject(json);
-        Jenkins j = Jenkins.getActiveInstance();
+        Jenkins j = Jenkins.get();
         Class<?> c = j.getPluginManager().uberClassLoader.loadClass(jsonO.getString("stapler-class"));
         Descriptor descriptor = j.getDescriptor(c.asSubclass(Describable.class));
         if (descriptor == null) {
-            return HttpResponses.plainText("<could not find " + c.getName() + ">");
+            return HttpResponses.text("<could not find " + c.getName() + ">");
         }
         Object o;
         try {
             o = descriptor.newInstance(req, jsonO);
         } catch (RuntimeException x) { // e.g. IllegalArgumentException
-            return HttpResponses.plainText(Functions.printThrowable(x));
+            return HttpResponses.text(Functions.printThrowable(x));
         }
         try {
             Step step = null;
@@ -485,7 +498,7 @@ import org.kohsuke.stapler.StaplerRequest;
                 // Look for a metastep which could take this as its delegate.
                 for (StepDescriptor d : StepDescriptor.allMeta()) {
                     if (d.getMetaStepArgumentType().isInstance(o)) {
-                        DescribableModel<?> m = new DescribableModel<>(d.clazz);
+                        DescribableModel<?> m = DescribableModel.of(d.clazz);
                         DescribableParameter soleRequiredParameter = m.getSoleRequiredParameter();
                         if (soleRequiredParameter != null) {
                             step = d.newInstance(Collections.singletonMap(soleRequiredParameter.getName(), o));
@@ -495,17 +508,17 @@ import org.kohsuke.stapler.StaplerRequest;
                 }
             }
             if (step == null) {
-                return HttpResponses.plainText("Cannot find a step corresponding to " + o.getClass().getName());
+                return HttpResponses.text("Cannot find a step corresponding to " + o.getClass().getName());
             }
             String groovy = step2Groovy(step);
             if (descriptor instanceof StepDescriptor && ((StepDescriptor) descriptor).isAdvanced()) {
                 String warning = Messages.Snippetizer_this_step_should_not_normally_be_used_in();
                 groovy = "// " + warning + "\n" + groovy;
             }
-            return HttpResponses.plainText(groovy);
+            return HttpResponses.text(groovy);
         } catch (UnsupportedOperationException x) {
             Logger.getLogger(CpsFlowExecution.class.getName()).log(Level.WARNING, "failed to render " + json, x);
-            return HttpResponses.plainText(x.getMessage());
+            return HttpResponses.text(x.getMessage());
         }
     }
 
@@ -514,7 +527,15 @@ import org.kohsuke.stapler.StaplerRequest;
          return req.findAncestorObject(Item.class);
     }
 
-    @Restricted(DoNotUse.class)
+    /**
+     * Used to generate the list of links on the sidepanel.
+     */
+    @Nonnull
+    public List<SnippetizerLink> getSnippetizerLinks() {
+        return ExtensionList.lookup(SnippetizerLink.class);
+    }
+
+    @Restricted(NoExternalUse.class)
     @Extension public static class PerJobAdder extends TransientActionFactory<Job> {
 
         @Override public Class<Job> type() {
@@ -541,7 +562,7 @@ import org.kohsuke.stapler.StaplerRequest;
     public static class LocalAction extends Snippetizer {
 
         @Override public String getDisplayName() {
-            return "Pipeline Syntax";
+            return Messages.Pipeline_Syntax();
         }
 
         public String getIconClassName() {

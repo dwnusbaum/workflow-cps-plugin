@@ -18,6 +18,8 @@ import org.codehaus.groovy.control.CompilationFailedException;
 import org.codehaus.groovy.control.CompilationUnit;
 import org.codehaus.groovy.control.CompilerConfiguration;
 import org.codehaus.groovy.control.SourceUnit;
+import org.jenkinsci.plugins.scriptsecurity.sandbox.Whitelist;
+import org.jenkinsci.plugins.scriptsecurity.sandbox.groovy.GroovySandbox;
 
 /**
  * {@link GroovyShell} with additional tweaks necessary to run {@link CpsScript}
@@ -109,8 +111,10 @@ class CpsGroovyShell extends GroovyShell {
     @Override
     public Script parse(GroovyCodeSource codeSource) throws CompilationFailedException {
         Script s = doParse(codeSource);
-        if (execution!=null)
-            execution.loadedScripts.put(s.getClass().getName(), codeSource.getScriptText());
+        if (execution!=null) {
+            execution.loadedScripts.put(s.getClass().getSimpleName(), codeSource.getScriptText());
+            execution.saveExecutionIfDurable();
+        }
         prepareScript(s);
         return s;
     }
@@ -124,12 +128,20 @@ class CpsGroovyShell extends GroovyShell {
     }
 
     private Script doParse(GroovyCodeSource codeSource) throws CompilationFailedException {
-        if (execution != null) {
-            try (CpsFlowExecution.Timing t = execution.time(CpsFlowExecution.TimingKind.parse)) {
-                return super.parse(codeSource);
-            }
-        } else {
-            return super.parse(codeSource);
+        try {
+            return GroovySandbox.runInSandbox(() -> {
+                if (execution != null) {
+                    try (CpsFlowExecution.Timing t = execution.time(CpsFlowExecution.TimingKind.parse)) {
+                        return super.parse(codeSource);
+                    }
+                } else {
+                    return super.parse(codeSource);
+                }
+            }, Whitelist.all());
+        } catch (RuntimeException x) { // incl. CompilationFailedException, RejectedAccessException
+            throw x;
+        } catch (Exception x) {
+            throw new AssertionError(x);
         }
     }
 

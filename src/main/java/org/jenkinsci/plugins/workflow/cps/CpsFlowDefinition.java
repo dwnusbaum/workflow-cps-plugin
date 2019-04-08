@@ -27,18 +27,26 @@ package org.jenkinsci.plugins.workflow.cps;
 import hudson.Extension;
 import hudson.model.Action;
 import hudson.model.Item;
+import hudson.model.Job;
+import hudson.model.Queue;
+import hudson.model.Run;
 import hudson.model.TaskListener;
 import hudson.util.FormValidation;
 import hudson.util.StreamTaskListener;
 import org.jenkinsci.plugins.workflow.cps.persistence.PersistIn;
+import org.jenkinsci.plugins.workflow.flow.DurabilityHintProvider;
 import org.jenkinsci.plugins.workflow.flow.FlowDefinition;
 import org.jenkinsci.plugins.workflow.flow.FlowDefinitionDescriptor;
+import org.jenkinsci.plugins.workflow.flow.FlowDurabilityHint;
 import org.jenkinsci.plugins.workflow.flow.FlowExecutionOwner;
+import org.jenkinsci.plugins.workflow.flow.GlobalDefaultFlowDurabilityLevel;
+import org.kohsuke.stapler.AncestorInPath;
 import org.kohsuke.stapler.DataBoundConstructor;
 
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
+
 import net.sf.json.JSON;
 import net.sf.json.JSONArray;
 import org.codehaus.groovy.control.CompilationFailedException;
@@ -48,9 +56,11 @@ import org.jenkinsci.plugins.scriptsecurity.scripts.languages.GroovyLanguage;
 
 import static org.jenkinsci.plugins.workflow.cps.persistence.PersistenceContext.*;
 
+import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.Stapler;
 import org.kohsuke.stapler.StaplerRequest;
+import org.kohsuke.stapler.interceptor.RequirePOST;
 
 /**
  * @author Kohsuke Kawaguchi
@@ -106,7 +116,9 @@ public class CpsFlowDefinition extends FlowDefinition {
                 return ((CpsFlowFactoryAction2) a).create(this, owner, actions);
             }
         }
-        return new CpsFlowExecution(sandbox ? script : ScriptApproval.get().using(script, GroovyLanguage.get()), sandbox, owner);
+        Queue.Executable exec = owner.getExecutable();
+        FlowDurabilityHint hint = (exec instanceof Run) ? DurabilityHintProvider.suggestedFor(((Run)exec).getParent()) : GlobalDefaultFlowDurabilityLevel.getDefaultDurabilityHint();
+        return new CpsFlowExecution(sandbox ? script : ScriptApproval.get().using(script, GroovyLanguage.get()), sandbox, owner, hint);
     }
 
     @Extension
@@ -117,14 +129,19 @@ public class CpsFlowDefinition extends FlowDefinition {
             return "Pipeline script";
         }
 
+        @RequirePOST
         public FormValidation doCheckScript(@QueryParameter String value, @QueryParameter boolean sandbox) {
             return sandbox ? FormValidation.ok() : ScriptApproval.get().checking(value, GroovyLanguage.get());
         }
 
-        public JSON doCheckScriptCompile(@QueryParameter String value) {
+        @RequirePOST
+        public JSON doCheckScriptCompile(@AncestorInPath Item job, @QueryParameter String value) {
+            if (!job.hasPermission(Job.CONFIGURE)) {
+                return CpsFlowDefinitionValidator.CheckStatus.SUCCESS.asJSON();
+            }
             try {
                 CpsGroovyShell trusted = new CpsGroovyShellFactory(null).forTrusted().build();
-                new CpsGroovyShellFactory(null).withParent(trusted).build().getClassLoader().parseClass(value);
+                new CpsGroovyShellFactory(null).withParent(trusted).withSandbox(true).build().getClassLoader().parseClass(value);
             } catch (CompilationFailedException x) {
                 return JSONArray.fromObject(CpsFlowDefinitionValidator.toCheckStatus(x).toArray());
             }
