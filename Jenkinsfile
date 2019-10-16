@@ -1,1 +1,3 @@
-buildPlugin(useAci: true, configurations: buildPlugin.recommendedConfigurations())
+node('master') {
+    sh('ls -l && mvn -B clean verify')
+}
