@@ -5,6 +5,6 @@ stage('Build') {
     }
 }
 stage('Demo') {
-    echo('Hi!')
+    echo('Hello!')
     sleep 10
 }
