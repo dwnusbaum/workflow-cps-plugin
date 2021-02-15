@@ -261,13 +261,14 @@ public class PersistenceProblemsTest {
         });
     }
 
+    @Issue("JENKINS-55287")
     @Test
     public void inProgressMaxPerfDirtyShutdown() throws Exception {
         final int[] build = new int[1];
         final String[] finalNodeId = new String[1];
         story.thenWithHardShutdown( j -> {
             runBasicPauseOnInput(j, DEFAULT_JOBNAME, build, FlowDurabilityHint.PERFORMANCE_OPTIMIZED);
-            // SHOULD still save at end via persist-at-shutdown hooks
+            // Will not be saved since the persist-at-shutdown hooks will occur after the snapshot for thenWithHardShutdown is taken.
         });
         story.then( j->{
             WorkflowJob r = j.jenkins.getItemByFullName(DEFAULT_JOBNAME, WorkflowJob.class);
@@ -275,6 +276,7 @@ public class PersistenceProblemsTest {
             Thread.sleep(1000);
             j.waitForCompletion(run);
             assertCompletedCleanly(run);
+            j.assertLogContains("FlowNode was not found in storage for head", run);
             Assert.assertEquals(Result.FAILURE, run.getResult());
             finalNodeId[0] = run.getExecution().getCurrentHeads().get(0).getId();
         });
