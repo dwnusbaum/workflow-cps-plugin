@@ -276,7 +276,7 @@ public class PersistenceProblemsTest {
             Thread.sleep(1000);
             j.waitForCompletion(run);
             assertCompletedCleanly(run);
-            j.assertLogContains("FlowNode was not found in storage for head", run);
+            j.assertLogContains("Unable to resume " + run + " because it was not saved before Jenkins shut down", run);
             Assert.assertEquals(Result.FAILURE, run.getResult());
             finalNodeId[0] = run.getExecution().getCurrentHeads().get(0).getId();
         });

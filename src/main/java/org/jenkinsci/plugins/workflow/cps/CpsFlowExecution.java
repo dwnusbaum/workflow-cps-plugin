@@ -671,6 +671,7 @@ public class CpsFlowExecution extends FlowExecution implements BlockableResume {
             end.addAction(new ErrorAction(failureReason));
             head.setNewHead(end);
         }
+        this.persistedClean = true;
         saveOwner();
     }
 
@@ -721,6 +722,13 @@ public class CpsFlowExecution extends FlowExecution implements BlockableResume {
     public void onLoad(FlowExecutionOwner owner) throws IOException {
         this.owner = owner;
 
+        if (!canResume()) {
+            String message = isResumeBlocked()
+                    ? "Stopping " + owner.getExecutable() + " because it is configured to not resume."
+                    : "Unable to resume " + owner.getExecutable() + " because it was not saved before Jenkins shut down. Did Jenkins crash?";
+            throw new AbortException(message);
+        }
+
         try {
             try {
                 initializeStorage();  // Throws exception and bombs out if we can't load FlowNodes
@@ -745,15 +753,11 @@ public class CpsFlowExecution extends FlowExecution implements BlockableResume {
                     done = true;
                     saveOwner();
                 }
-            } else {  // See if we can/should resume build
-                if (canResume()) {
-                    loadProgramAsync(getProgramDataFile());
-                } else {
-                    // TODO if possible, consider trying to close out unterminated blocks to keep existing graph history
-                    // That way we can visualize the graph in some error cases.
-                    LOGGER.log(Level.WARNING, "Pipeline state not properly persisted, cannot resume "+owner.getUrl());
-                    throw new IOException("Cannot resume build -- was not cleanly saved when Jenkins shut down.");
-                }
+            } else {
+                // Before we resume, we need to unset persistedClean (and persist the change) in case Jenkins restarts again.
+                persistedClean = null;
+                saveOwner();
+                loadProgramAsync(getProgramDataFile());
             }
         } catch (Exception e) {  // Broad catch ensures that failure to load do NOT nuke the master
             SettableFuture<CpsThreadGroup> p = SettableFuture.create();
@@ -1480,6 +1484,10 @@ public class CpsFlowExecution extends FlowExecution implements BlockableResume {
             } finally {
                 if (synchronous) {
                     bc.abort(); // hack to skip save—we are holding a lock
+                } else if (false && !getDurabilityHint().isPersistWithEveryStep() && !isComplete()
+                        && nodes.stream().noneMatch(FlowEndNode.class::isInstance)) {
+                    // Do not save in PERFORMANCE_OPTIMIZED mode unless this is the end of the build.
+                    bc.abort();
                 } else {
                     try {
                         bc.commit();
@@ -1556,6 +1564,9 @@ public class CpsFlowExecution extends FlowExecution implements BlockableResume {
                     checkAndAbortNonresumableBuild();  // TODO Verify if we can rely on just killing paused builds at shutdown via checkAndAbortNonresumableBuild()
                     checkpoint(false);
                 } else {
+                    // Before we resume, we need to unset persistedClean (and persist the change) in case Jenkins restarts again.
+                    persistedClean = null;
+                    saveOwner();
                     g.unpause();
                 }
                 try {
@@ -1960,7 +1971,6 @@ public class CpsFlowExecution extends FlowExecution implements BlockableResume {
         try {
             if (this.owner != null && this.owner.getExecutable() instanceof Saveable) {  // Null-check covers some anomalous cases we've seen
                 Saveable saveable = (Saveable)(this.owner.getExecutable());
-                persistedClean = true;
                 if (storage != null && storage.delegate != null) {
                     // Defensively flush FlowNodes to storage
                     try {
