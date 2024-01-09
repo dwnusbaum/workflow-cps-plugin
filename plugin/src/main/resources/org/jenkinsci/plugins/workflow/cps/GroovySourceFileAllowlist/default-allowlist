@@ -1,4 +1,9 @@
 # This list is ordered from most popular to least popular plugin to minimize performance impact.
+# TODO: The kubernetes and amazon-ecs plugin entries should be unnecessary, but https://github.com/jenkinsci/workflow-cps-plugin/pull/538#issuecomment-1883042255 reports a problem whose root cause is not yet known.
+# kubernetes
+/org/csanchez/jenkins/plugins/kubernetes/pipeline/KubernetesDeclarativeAgentScript.groovy
+# amazon-ecs
+/com/cloudbees/jenkins/plugins/amazonecs/pipeline/ECSDeclarativeAgentScript.groovy
 # workflow-remote-loader:
 /org/jenkinsci/plugins/workflow/remoteloader/FileLoaderDSL/FileLoaderDSLImpl.groovy
 # confluence-publisher
