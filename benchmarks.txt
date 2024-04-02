@@ -1,0 +1,8 @@
+Benchmark                                               (tasks)  (threads)  Mode  Cnt  Score    Error  Units
+GroovyCategorySupportBenchmark.categoryPerTask            10000        100  avgt    5  0.062 ±  0.003   s/op
+GroovyCategorySupportBenchmark.categoryPerTask:async      10000        100  avgt         NaN             ---
+GroovyCategorySupportBenchmark.categoryPerThread          10000        100  avgt    5  0.017 ±  0.001   s/op
+GroovyCategorySupportBenchmark.categoryPerThread:async    10000        100  avgt         NaN             ---
+GroovyCategorySupportBenchmark.control                    10000        100  avgt    5  0.016 ±  0.001   s/op
+GroovyCategorySupportBenchmark.control:async              10000        100  avgt         NaN             ---
+
